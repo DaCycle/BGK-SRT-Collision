@@ -2,14 +2,17 @@
 
 __constant__ double w[9];
 __constant__ double Ksi[9][2];
+__constant__ double Tau;
 
 int main()
 {
 	// Initialize Constants
 	double h_w[9] = { 4.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0 };
 	double h_Ksi[9][2] = { { 0.0, 0.0 }, { 1.0, 0.0 }, { 0.0, 1.0 }, { -1.0, 0.0 }, { 0.0, -1.0 }, { 1.0, 1.0 }, { -1.0, 1.0 }, { -1.0, -1.0 }, { 1.0, -1.0 } };
+	double h_Tau = 0.6;
 	cudaMemcpyToSymbol(w, h_w, sizeof(h_w));
 	cudaMemcpyToSymbol(Ksi, h_Ksi, sizeof(h_Ksi));
+	cudaMemcpyToSymbol(Tau, &h_Tau, sizeof(h_Tau));
 
 	// Set different grid sizes
 	const int sizes = 6;
@@ -20,6 +23,7 @@ int main()
 	{
 		float moment_ms_vec = 0;
 		float eqm_ms_vec = 0;
+		float col_ms_vec = 0;
 
 		// Set size of the grid
 		const int N_x = G[i];
@@ -28,6 +32,7 @@ int main()
 		// Allocate CPU memory
 		double* h_f = new double[N_x * N_y * 9];
 		double* h_f_eq = new double[N_x * N_y * 9];
+		double* h_f_star = new double[N_x * N_y * 9];
 		double* h_Rho = new double[N_x * N_y];
 		double* h_U = new double[N_x * N_y * 2];
 
@@ -52,10 +57,12 @@ int main()
 		// Allocate GPU memory
 		double* d_f;
 		double* d_f_eq;
+		double* d_f_star;
 		double* d_rho;
 		double* d_U;
 		cudaMalloc((void**)&d_f, N_x * N_y * 9 * sizeof(double));
 		cudaMalloc((void**)&d_f_eq, N_x * N_y * 9 * sizeof(double));
+		cudaMalloc((void**)&d_f_star, N_x * N_y * 9 * sizeof(double));
 		cudaMalloc((void**)&d_rho, N_x * N_y * sizeof(double));
 		cudaMalloc((void**)&d_U, N_x * N_y * 2 * sizeof(double));
 
@@ -110,28 +117,62 @@ int main()
 			}
 		}
 
+		for (int j = 0; j < runs; ++j) {
+
+			// start eqm kernel timing
+			cudaEvent_t col_Start, col_Stop;
+			cudaEventCreate(&col_Start);
+			cudaEventCreate(&col_Stop);
+			cudaEventRecord(col_Start);
+
+
+			// Call collision_d2q9 kernel
+			int blockSize = 256;
+			int numBlocks = (N_x * N_y * 9 + blockSize - 1) / blockSize;
+			collision_d2q9 << <numBlocks, blockSize >> > (d_f, d_f_eq, d_f_star, N_x, N_y);
+
+			// Record the col_Stop event for the kernel execution
+			cudaEventRecord(col_Stop);
+			cudaEventSynchronize(col_Stop);
+			if (j > 4) { // Skip first 5 iterations for warm-up
+				// Calculate elapsed time
+				float col_ms;
+				cudaEventElapsedTime(&col_ms, col_Start, col_Stop);
+				col_ms_vec += col_ms;
+			}
+		}
+
 		// Wait for GPU to finish before accessing on host
 		cudaDeviceSynchronize();
 
 		// Copy results back to host
-		cudaMemcpy(h_f_eq, d_f_eq, N_x * N_y * 9 * sizeof(double), cudaMemcpyDeviceToHost);
+		cudaMemcpy(h_f_star, d_f_star, N_x * N_y * 9 * sizeof(double), cudaMemcpyDeviceToHost);
 
 		// Output Sample Results
 		//cout << "Rho: " << h_Rho[0] << ", " << h_Rho[1] << ", " << h_Rho[2] << ", " << h_Rho[3] << "\n";
 		//cout << "U: (" << h_U[0] << ", " << h_U[0 + N_x * N_y] << "), (" << h_U[1] << ", " << h_U[1 + N_x * N_y] << ")\n";
 		//cout << "Time taken for moment kernel execution: " << moment_ms << " ms\n";
-		cout << "f_eq(:, 1, 2): " << h_f_eq[9] << ", " << h_f_eq[10] << ", " << h_f_eq[11] << ", " << h_f_eq[12] << ", " 
-			 << h_f_eq[13] << ", " << h_f_eq[14] << ", " << h_f_eq[15] << ", " << h_f_eq[16] << ", " 
-			<< h_f_eq[17] << "\n";
+		//cout << "f_eq(:, 1, 2): " << h_f_eq[9] << ", " << h_f_eq[10] << ", " << h_f_eq[11] << ", " << h_f_eq[12] << ", " 
+		//	 << h_f_eq[13] << ", " << h_f_eq[14] << ", " << h_f_eq[15] << ", " << h_f_eq[16] << ", " 
+		//	<< h_f_eq[17] << "\n";
+		cout << "f_star(:, 1, 2): " << h_f_star[9] << ", " << h_f_star[10] << ", " << h_f_star[11] << ", " << h_f_star[12] << ", "
+			<< h_f_star[13] << ", " << h_f_star[14] << ", " << h_f_star[15] << ", " << h_f_star[16] << ", "
+			<< h_f_star[17] << "\n";
+		
 
 		// Output average time taken for each grid size
-		cout << "Average time taken for grid size " << N_x << ": " << moment_ms_vec / (runs - 5.0f) << " ms\n";
+		cout << "Average time taken for moment kernel execution for grid size " << N_x << ": " << moment_ms_vec / (runs - 5.0f) << " ms\n";
 		cout << "Average time taken for eqm kernel execution for grid size " << N_x << ": " << eqm_ms_vec / (runs - 5.0f) << " ms\n";
+		cout << "Time taken for collision kernel execution: " << col_ms_vec / (runs - 5.0f) << " ms\n";
 
 		// Free allocated memory
 		delete[] h_f;
 		delete[] h_Rho;
 		delete[] h_U;
+		delete[] h_f_eq;
+		delete[] h_f_star;
+		cudaFree(d_f_star);
+		cudaFree(d_f_eq);
 		cudaFree(d_f);
 		cudaFree(d_rho);
 		cudaFree(d_U);

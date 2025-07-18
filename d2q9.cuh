@@ -25,6 +25,12 @@ __global__ void eqm_d2q9(double* rho, double* U, double* f_eq, int N_x, int N_y)
 __global__ void moment_rho_u_d2q9(double* f, double* rho, double* U, int N_x, int N_y);
 #endif
 
+#ifndef COLLISION_D2Q9_H
+#define COLLISION_D2Q9_H
+__global__ void collision_d2q9(double* f_new, double* f_eq, double* f, int N_x, int N_y);
+#endif
+
 #pragma once
 extern __constant__ double w[9];
 extern __constant__ double Ksi[9][2];
+extern __constant__ double Tau;
